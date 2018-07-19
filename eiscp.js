@@ -11,6 +11,8 @@ var self, eiscp, send_queue,
     COMMAND_MAPPINGS = eiscp_commands.command_mappings,
     VALUE_MAPPINGS = eiscp_commands.value_mappings,
     MODELSETS = eiscp_commands.modelsets,
+	xml = '', // Puffer
+	first = true, // Indikator erstes Packet
     config = { port: 60128, reconnect: true, reconnect_sleep: 5, modelsets: [], send_delay: 500, verify_commands: true };
 
 module.exports = self = new events.EventEmitter();
@@ -54,7 +56,7 @@ function eiscp_packet_extract(packet) {
       Exracts message from eISCP packet
       Strip first 18 bytes and last 3 since that's only the header and end characters
     */
-    return packet.toString('ascii', 18, packet.length - 3);
+    return packet.toString('ascii', 18, packet.length - 3); //return packet.toString('ascii', 18, packet.length - 3);
 }
 
 function iscp_to_command(iscp_message) {
@@ -72,7 +74,7 @@ function iscp_to_command(iscp_message) {
             var zone_cmd = COMMANDS[zone][command];
 
             result.command = zone_cmd.name;
-
+	    result.zone = zone;
             if (typeof zone_cmd.values[value] !== 'undefined') {
 
                 result.argument = zone_cmd.values[value].name;
@@ -146,7 +148,7 @@ function command_to_iscp(command, args, zone) {
 
     if (typeof VALUE_MAPPINGS[zone][prefix][args] === 'undefined') {
 
-        if (typeof VALUE_MAPPINGS[zone][prefix].INTRANGES !== 'undefined' && /^\d+$/.test(args)) {
+        if (typeof VALUE_MAPPINGS[zone][prefix].INTRANGES !== 'undefined' && /^[0-9\-+]+$/.test(args)) {
             // This command is part of a integer range
             intranges = VALUE_MAPPINGS[zone][prefix].INTRANGES;
             len = intranges.length;
@@ -164,10 +166,16 @@ function command_to_iscp(command, args, zone) {
                 value = args;
             }
 
-            // Convert decimal number to hexadecimal since receiver doesn't understand decimal
-            value = (+value).toString(16).toUpperCase();
-			// Pad value if it is not 2 digits
-            value = (value.length < 2) ? '0' + value : value;
+            if (value.indexOf('+') !== -1){ // For range -12 to + 12
+        		// Convert decimal number to hexadecimal since receiver doesn't understand decimal
+				value = (+value).toString(16).toUpperCase();
+				value = '+' + value;
+			} else {
+				// Convert decimal number to hexadecimal since receiver doesn't understand decimal
+				value = (+value).toString(16).toUpperCase();
+				// Pad value if it is not 2 digits
+				value = (value.length < 2) ? '0' + value : value;
+			}
 
         } else {
 
@@ -257,9 +265,11 @@ self.discover = function () {
     })
 	.on('listening', function () {
         client.setBroadcast(true);
-        var buffer = eiscp_packet('!xECNQSTN');
+        var onkyo_buffer = eiscp_packet('!xECNQSTN');
+	var pioneer_buffer = eiscp_packet('!pECNQSTN');
         self.emit('debug', util.format("DEBUG (sent_discovery) Sent broadcast discovery packet to %s:%s", options.address, options.port));
-        client.send(buffer, 0, buffer.length, options.port, options.address);
+        client.send(onkyo_buffer, 0, onkyo_buffer.length, options.port, options.address);
+	client.send(pioneer_buffer, 0, pioneer_buffer.length, options.port, options.address);
         timeout_timer = setTimeout(close, options.timeout * 1000);
     })
     .bind(0);
@@ -363,29 +373,116 @@ self.connect = function (options) {
 	}).
 
 	on('data', function (data) {
-
-		var iscp_message = eiscp_packet_extract(data),
-			result = iscp_to_command(iscp_message);
-
-		result.iscp_command = iscp_message;
-        result.host  = config.host;
-        result.port  = config.port;
-        result.model = config.model;
-
-		self.emit('debug', util.format("DEBUG (received_data) Received data from %s:%s - %j", config.host, config.port, result));
-		self.emit('data', result);
-
-		// If the command is supported we emit it as well
-		if (typeof result.command !== 'undefined') {
-			if (Array.isArray(result.command)) {
-				result.command.forEach(function (cmd) {
-					self.emit(cmd, result.argument);
-				});
-			} else {
-				self.emit(result.command, result.argument);
+		
+		if(first) {
+			xml = eiscp_packet_extract(data);
+			first = false;
+			var result = iscp_to_command(xml);
+			result.iscp_command = xml;
+			result.host  = config.host;
+			result.port  = config.port;
+			result.model = config.model;
+			
+			if(result.command == 'receiver-information' | result.command == 'net-usb-list-info-allitems') {
+			xml= data.toString('ascii', 18);
 			}
-		}
-	});
+			
+			if (xml.includes("NLAX*")) {
+				xml = xml.slice(xml.indexOf('NLAX'));
+			}
+			
+			if (xml.includes("</response>")) {
+					self.emit('debug', util.format("DEBUG (indexOf('</response>')) command %s", xml));
+					self.emit('data', result);
+					first = true
+			
+			/*		if (typeof result.command !== 'undefined') {
+						if (Array.isArray(result.command)) {
+							result.command.forEach(function (cmd) {
+								self.emit(cmd, result.argument);
+							});
+						} else {
+							self.emit(result.command, result.argument);
+						}	
+					} */
+			}
+			
+		} 
+		else {  
+			xml = xml + data.toString('ascii'); // evtl. data.toString() ?
+			self.emit('debug', util.format("DEBUG (XML) command %s", xml));
+			
+			var result = iscp_to_command(xml);
+			result.iscp_command = xml;
+			result.host  = config.host;
+			result.port  = config.port;
+			result.model = config.model;
+			
+			if (xml.includes("</response>")) {
+				self.emit('data', result);
+				first = true
+			
+		/*		if (typeof result.command !== 'undefined') {
+					if (Array.isArray(result.command)) {
+						result.command.forEach(function (cmd) {
+							self.emit(cmd, result.argument);
+						});
+					} else {
+						self.emit(result.command, result.argument);
+					}	
+				} */
+			
+			}
+		}   
+			
+		if(result.command !== 'receiver-information' && result.command !== 'net-usb-list-info-allitems') {
+			first = true;
+			
+
+
+			self.emit('debug', util.format("DEBUG (received_data) Received data from %s:%s - %j", config.host, config.port, result));
+			self.emit('data', result);
+
+			// If the command is supported we emit it as well
+		/*	if (typeof result.command !== 'undefined') {
+				if (Array.isArray(result.command)) {
+					result.command.forEach(function (cmd) {
+						self.emit(cmd, result.argument);
+					});
+				} else {
+					self.emit(result.command, result.argument);
+				}
+			} */ 
+		}	
+	}); 
+/*
+    on('data', function (data) {
+		
+			self.emit('debug', util.format("DEBUG (on(data)) Received data from %s", data));
+
+            var iscp_message = eiscp_packet_extract(data),
+            result = iscp_to_command(iscp_message);
+			self.emit('debug', util.format("DEBUG (on(data)) command %s", result.command));
+            result.iscp_command = iscp_message;
+			result.host  = config.host;
+			result.port  = config.port;
+			result.model = config.model;
+			
+
+            self.emit('debug', util.format("DEBUG (received_data) Received data from %s:%s - %j", config.host, config.port, result));			
+            self.emit('data', result);
+
+            // If the command is supported we emit it as well
+            if (typeof result.command !== 'undefined') {
+                    if (Array.isArray(result.command)) {
+                            result.command.forEach(function (cmd) {
+                                    self.emit(cmd, result.argument);
+                            });
+                    } else {
+                            self.emit(result.command, result.argument);
+                    }
+            }
+    }); */	
 };
 
 self.close = self.disconnect = function () {

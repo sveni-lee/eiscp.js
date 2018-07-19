@@ -387,11 +387,18 @@ self.connect = function (options) {
 			xml= data.toString('ascii', 18);
 			}
 			
-			if (xml.includes("NLAX*")) {
-				xml = xml.slice(xml.indexOf('NLAX'));
+			if (xml.includes("NLAX") && xml.includes("</response>")) {
+				xml = xml.slice(xml.indexOf("NLAX"));
+				var result = {};
+				result.iscp_command = xml;
+				result.host  = config.host;
+				result.port  = config.port;
+				result.model = config.model;
+				self.emit('data', result);
+				first = true
 			}
 			
-			if (xml.includes("</response>")) {
+			else if (xml.includes("</response>") && !xml.includes("NLAX")) {
 					self.emit('debug', util.format("DEBUG (indexOf('</response>')) command %s", xml));
 					self.emit('data', result);
 					first = true
